@@ -13,6 +13,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -201,7 +202,7 @@ Status IRExecutionUnit::DisassembleFunction(Stream &stream,
                                       UINT32_MAX, false, false);
 
   InstructionList &instruction_list = disassembler_sp->GetInstructionList();
-  instruction_list.Dump(&stream, true, true, /*show_control_flow_kind=*/true,
+  instruction_list.Dump(&stream, true, true, /*show_control_flow_kind=*/false,
                         &exe_ctx);
 
   return ret;
@@ -212,18 +213,17 @@ struct IRExecDiagnosticHandler : public llvm::DiagnosticHandler {
   Status *err;
   IRExecDiagnosticHandler(Status *err) : err(err) {}
   bool handleDiagnostics(const llvm::DiagnosticInfo &DI) override {
-    if (DI.getKind() == llvm::DK_SrcMgr) {
+    if (DI.getSeverity() == llvm::DS_Error) {
       const auto &DISM = llvm::cast<llvm::DiagnosticInfoSrcMgr>(DI);
       if (err && err->Success()) {
         err->SetErrorToGenericError();
         err->SetErrorStringWithFormat(
-            "Inline assembly error: %s",
+            "IRExecution error: %s",
             DISM.getSMDiag().getMessage().str().c_str());
       }
-      return true;
     }
 
-    return false;
+    return true;
   }
 };
 } // namespace
@@ -280,10 +280,13 @@ void IRExecutionUnit::GetRunnableInfo(Status &error, lldb::addr_t &func_addr,
   llvm::EngineBuilder builder(std::move(m_module_up));
   llvm::Triple triple(m_module->getTargetTriple());
 
+  // PIC needed for ELF to avoid generating 32-bit relocations (which overflow
+  // if the object is loaded into high memory).
+  bool want_pic = triple.isOSBinFormatMachO() || triple.isOSBinFormatELF();
+
   builder.setEngineKind(llvm::EngineKind::JIT)
       .setErrorStr(&error_string)
-      .setRelocationModel(triple.isOSBinFormatMachO() ? llvm::Reloc::PIC_
-                                                      : llvm::Reloc::Static)
+      .setRelocationModel(want_pic ? llvm::Reloc::PIC_ : llvm::Reloc::Static)
       .setMCJITMemoryManager(std::make_unique<MemoryManager>(*this))
       .setOptLevel(llvm::CodeGenOptLevel::Less);
 
